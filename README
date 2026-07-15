@@ -1,0 +1,70 @@
+import requests
+import os
+import sys
+
+# Configurazioni di base - Usa le variabili d'ambiente per sicurezza
+# Mai hardcodare le credenziali nel codice.
+BASE_URL = os.getenv("API_BASE_URL", "https://tuo-dominio.atlassian.net/rest/agile/1.0/board")
+USER = os.getenv("API_USER", "tua_email@dominio.com")
+TOKEN = os.getenv("API_TOKEN", "il_tuo_api_token")
+
+def get_board_count(project_key):
+    """
+    Interroga l'API per ottenere il numero di board associate a un progetto.
+    """
+    headers = {"Accept": "application/json"}
+    params = {
+        "projectKeyOrId": project_key,
+        "maxResults": 0 # Ottimizzazione: non vogliamo i dati delle board, solo il count ("total")
+    }
+
+    try:
+        response = requests.get(BASE_URL, headers=headers, auth=(USER, TOKEN), params=params, timeout=10)
+        
+        # Gestione robusta degli errori HTTP
+        if response.status_code == 401:
+            print("Errore 401: Non autorizzato. Controlla le credenziali.")
+            sys.exit(1)
+        elif response.status_code == 404:
+            print(f"Errore 404: Progetto '{project_key}' non trovato.")
+            return 0
+            
+        response.raise_for_status()
+        data = response.json()
+        
+        # Estrapola il totale fornito dai metadati dell'API
+        return data.get("total", 0)
+
+    except requests.exceptions.RequestException as e:
+        print(f"Errore di rete recuperando il progetto '{project_key}': {e}")
+        return 0
+
+def main():
+    file_path = "projects.txt"
+    total_boards = 0
+
+    # Verifica preliminare dell'esistenza del file
+    if not os.path.exists(file_path):
+        print(f"Errore critico: Il file '{file_path}' non esiste nella directory corrente.")
+        sys.exit(1)
+
+    # Lettura pulita del file: ignora righe vuote e toglie gli spazi
+    with open(file_path, "r", encoding="utf-8") as file:
+        projects = [line.strip() for line in file if line.strip()]
+
+    if not projects:
+        print("Il file txt è vuoto.")
+        return
+
+    print(f"Inizio elaborazione di {len(projects)} progetti...\n")
+
+    for project in projects:
+        count = get_board_count(project)
+        print(f"Progetto: {project} -> Board trovate: {count}")
+        total_boards += count
+
+    print("-" * 30)
+    print(f"TOTALE COMPLESSIVO BOARD: {total_boards}")
+
+if __name__ == "__main__":
+    main()
