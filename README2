@@ -1,0 +1,54 @@
+import os
+import requests
+from datetime import datetime, timedelta
+
+def create_sprint(api_url, project_id, sprint_name, start_date, end_date):
+    # Sicurezza: il token viene prelevato dall'ambiente. 
+    api_token = os.getenv("API_TOKEN")
+
+    if not api_token:
+        raise ValueError("Il token API non è configurato nelle variabili d'ambiente.")
+
+    # Questi header sono uno standard, ma la piattaforma specifica potrebbe richiedere variazioni
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+    # La struttura del payload è un'astrazione. Ogni piattaforma richiederà campi specifici.
+    payload = {
+        "projectId": project_id,
+        "name": sprint_name,
+        "startDate": start_date,
+        "endDate": end_date,
+        "goal": "Obiettivo dello sprint definito via API"
+    }
+
+    try:
+        # Il timeout previene il blocco indefinito dello script in caso di problemi di rete
+        response = requests.post(api_url, json=payload, headers=headers, timeout=10)
+        
+        # Intercetta automaticamente i codici di stato 4xx e 5xx
+        response.raise_for_status()
+
+        print(f"Sprint '{sprint_name}' creato con successo!")
+        return response.json()
+
+    except requests.exceptions.HTTPError as err:
+        print(f"Errore HTTP durante la creazione dello sprint: {err}")
+        print(f"Dettagli di risposta dell'API: {response.text}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Errore di connessione o timeout: {e}")
+        return None
+
+if __name__ == "__main__":
+    # Parametri di test (da sostituire con i dati reali)
+    URL = "https://api.tuo-project-manager.com/v1/sprints"
+    PROJECT_ID = "12345"
+    SPRINT_NAME = f"Sprint - {datetime.now().strftime('%Y-%m-%d')}"
+    START = datetime.now().isoformat()
+    END = (datetime.now() + timedelta(days=14)).isoformat()
+
+    create_sprint(URL, PROJECT_ID, SPRINT_NAME, START, END)
