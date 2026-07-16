@@ -1,0 +1,81 @@
+import requests
+import csv
+import os
+from requests.auth import HTTPBasicAuth
+
+# Configurazione tramite variabili d'ambiente
+JIRA_URL = os.getenv("JIRA_URL", "https://tuo-dominio.atlassian.net")
+JIRA_USER = os.getenv("JIRA_USER", "tua_email@dominio.com")
+JIRA_TOKEN = os.getenv("JIRA_TOKEN", "il_tuo_api_token")
+
+API_ENDPOINT = f"{JIRA_URL}/rest/api/3/users/search"
+
+def get_active_jira_users():
+    users_data = []
+    start_at = 0
+    max_results = 50
+    is_last = False
+
+    print("Inizio estrazione utenti attivi da Jira...")
+
+    while not is_last:
+        params = {
+            'startAt': start_at,
+            'maxResults': max_results
+        }
+        
+        try:
+            response = requests.get(
+                API_ENDPOINT,
+                headers={"Accept": "application/json"},
+                auth=HTTPBasicAuth(JIRA_USER, JIRA_TOKEN),
+                params=params
+            )
+            response.raise_for_status()
+            users = response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Errore durante la chiamata API: {e}")
+            break
+
+        if not users:
+            break
+
+        for user in users:
+            # Filtriamo per account Atlassian E stato attivo
+            is_active = user.get("active", False)
+            is_human = user.get("accountType") == "atlassian"
+
+            if is_human and is_active:
+                users_data.append({
+                    'nome': user.get('displayName', 'N/A'),
+                    'uid': user.get('accountId', 'N/A'),
+                    'mail': user.get('emailAddress', 'N/A')
+                })
+
+        start_at += len(users)
+        print(f"Analizzati {start_at} utenti...")
+        
+        if len(users) < max_results:
+            is_last = True
+
+    return users_data
+
+def save_to_csv(data, filename="active_jira_users.csv"):
+    if not data:
+        print("Nessun dato da salvare.")
+        return
+
+    keys = ['nome', 'uid', 'mail']
+    
+    try:
+        with open(filename, mode='w', newline='', encoding='utf-8') as file:
+            writer = csv.DictWriter(file, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(data)
+        print(f"File CSV '{filename}' generato con successo. Totale utenti attivi: {len(data)}")
+    except IOError as e:
+        print(f"Errore durante il salvataggio del file: {e}")
+
+if __name__ == "__main__":
+    utenti_attivi = get_active_jira_users()
+    save_to_csv(utenti_attivi)
