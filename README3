@@ -1,0 +1,96 @@
+import requests
+import json
+import os
+
+# Configurazioni generiche
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
+
+def esporta_dati(source_url, source_user, source_token, source_project, file_comp, file_rel):
+    """Esporta components e releases in file JSON separati."""
+    auth = (source_user, source_token)
+    
+    # Endpoint
+    url_components = f"{source_url}/rest/api/2/project/{source_project}/components"
+    url_releases = f"{source_url}/rest/api/2/project/{source_project}/versions"
+    
+    # Export Components
+    print(f"Esportazione components dal progetto {source_project}...")
+    res_comp = requests.get(url_components, headers=HEADERS, auth=auth)
+    if res_comp.status_code == 200:
+        with open(file_comp, 'w', encoding='utf-8') as f:
+            json.dump(res_comp.json(), f, indent=4)
+        print(f"Salvati {len(res_comp.json())} components in {file_comp}")
+    else:
+        print(f"Errore export components: {res_comp.status_code} - {res_comp.text}")
+
+    # Export Releases
+    print(f"Esportazione releases dal progetto {source_project}...")
+    res_rel = requests.get(url_releases, headers=HEADERS, auth=auth)
+    if res_rel.status_code == 200:
+        with open(file_rel, 'w', encoding='utf-8') as f:
+            json.dump(res_rel.json(), f, indent=4)
+        print(f"Salvate {len(res_rel.json())} releases in {file_rel}")
+    else:
+        print(f"Errore export releases: {res_rel.status_code} - {res_rel.text}")
+
+
+def importa_dati(dest_url, dest_user, dest_token, dest_project, file_comp, file_rel):
+    """Legge i file JSON e importa i dati nel progetto Jira di destinazione."""
+    auth = (dest_user, dest_token)
+    
+    url_component = f"{dest_url}/rest/api/2/component"
+    url_version = f"{dest_url}/rest/api/2/version"
+
+    # Import Components
+    if os.path.exists(file_comp):
+        with open(file_comp, 'r', encoding='utf-8') as f:
+            components = json.load(f)
+        
+        print(f"Importazione components nel progetto {dest_project}...")
+        for comp in components:
+            # Creiamo un payload pulito. Non possiamo passare l'ID o il project originario.
+            payload = {
+                "name": comp.get("name"),
+                "project": dest_project,
+                "description": comp.get("description", "")
+            }
+            res = requests.post(url_component, json=payload, headers=HEADERS, auth=auth)
+            if res.status_code == 201:
+                print(f"  [OK] Component creato: {comp.get('name')}")
+            else:
+                print(f"  [ERRORE] Creazione {comp.get('name')}: {res.status_code} - {res.text}")
+
+    # Import Releases (Versions)
+    if os.path.exists(file_rel):
+        with open(file_rel, 'r', encoding='utf-8') as f:
+            releases = json.load(f)
+        
+        print(f"Importazione releases nel progetto {dest_project}...")
+        for rel in releases:
+            payload = {
+                "name": rel.get("name"),
+                "project": dest_project,
+                "description": rel.get("description", ""),
+                "archived": rel.get("archived", False),
+                "released": rel.get("released", False)
+            }
+            if "releaseDate" in rel:
+                payload["releaseDate"] = rel["releaseDate"]
+                
+            res = requests.post(url_version, json=payload, headers=HEADERS, auth=auth)
+            if res.status_code == 201:
+                print(f"  [OK] Release creata: {rel.get('name')}")
+            else:
+                print(f"  [ERRORE] Creazione {rel.get('name')}: {res.status_code} - {res.text}")
+
+# --- Esempio di utilizzo ---
+if __name__ == "__main__":
+    FILE_C = "components.json"
+    FILE_R = "releases.json"
+
+    # Sostituisci con i tuoi dati
+    # esporta_dati("https://source-jira.atlassian.net", "user@email.com", "API_TOKEN", "PROJ_A", FILE_C, FILE_R)
+    # importa_dati("https://dest-jira.atlassian.net", "user@email.com", "API_TOKEN", "PROJ_B", FILE_C, FILE_R)
