@@ -1,0 +1,12 @@
+SELECT 
+    u.display_name AS Nome,
+    u.user_name AS UID,
+    u.email_address AS Mail,
+    u.active AS Stato_Attivo,
+    -- Esempio di conversione timestamp per PostgreSQL (il DB più comune per Jira on-premise)
+    TO_TIMESTAMP(CAST(a.attribute_value AS BIGINT)/1000) AS Ultimo_Accesso
+FROM cwd_user u
+-- Uniamo la tabella degli attributi dove Jira salva il timestamp di login
+LEFT JOIN cwd_user_attributes a 
+    ON u.id = a.user_id AND a.attribute_name = 'login.lastLoginMillis'
+WHERE u.active = 1;
