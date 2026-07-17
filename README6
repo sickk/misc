@@ -1,0 +1,124 @@
+import requests
+from requests.auth import HTTPBasicAuth
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import json
+import os
+import sys
+
+# --- CONFIGURAZIONE ---
+DOMINIO = "tuodominio.atlassian.net"
+EMAIL = "tua.email@azienda.com"
+API_TOKEN = "il_tuo_api_token"
+
+# Fondamentale: per la paginazione, i dati DEVONO essere ordinati, altrimenti 
+# il database di Jira potrebbe restituire risultati sfalsati tra una chiamata e l'altra.
+JQL = 'project = "DEV" AND status = "In Progress" ORDER BY created ASC'
+
+FILE_DATI = "jira_issues_export.jsonl"
+FILE_CHECKPOINT = "jira_sync_state.json"
+MAX_RESULTS = 100
+
+def crea_sessione_resiliente(email, api_token):
+    """Crea una sessione HTTP corazzata contro rate limit e micro-disconnessioni."""
+    session = requests.Session()
+    session.auth = HTTPBasicAuth(email, api_token)
+    session.headers.update({"Accept": "application/json"})
+
+    retries = Retry(
+        total=5, 
+        backoff_factor=2, # Attese: 2s, 4s, 8s, 16s, 32s
+        status_forcelist=[429, 500, 502, 503, 504],
+        respect_retry_after_header=True
+    )
+    
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    
+    return session
+
+def leggi_checkpoint(jql_query):
+    """Legge il punto di ripristino. Se la JQL è cambiata, forza un reset."""
+    if os.path.exists(FILE_CHECKPOINT):
+        with open(FILE_CHECKPOINT, 'r') as f:
+            stato = json.load(f)
+            # Controllo di sicurezza: stiamo riprendendo la STESSA estrazione?
+            if stato.get("jql") == jql_query:
+                return stato.get("start_at", 0)
+            else:
+                print("⚠️ Attenzione: La JQL è cambiata rispetto al checkpoint. Ricomincio da zero.")
+    return 0
+
+def salva_checkpoint(jql_query, start_at):
+    """Salva su file l'indice dell'ultimo batch completato con successo."""
+    stato = {
+        "jql": jql_query,
+        "start_at": start_at
+    }
+    # Scrittura atomica: scrivo su un file temporaneo e poi rinomino
+    # per evitare corruzione se lo script viene killato esattamente durante la scrittura
+    tmp_file = f"{FILE_CHECKPOINT}.tmp"
+    with open(tmp_file, 'w') as f:
+        json.dump(stato, f)
+    os.replace(tmp_file, FILE_CHECKPOINT)
+
+def estrai_issue():
+    session = crea_sessione_resiliente(EMAIL, API_TOKEN)
+    url = f"https://{DOMINIO}/rest/api/3/search"
+    
+    start_at = leggi_checkpoint(JQL)
+    totale_issue = start_at + 1 # Inizializzazione fittizia per avviare il ciclo
+    
+    # Se iniziamo da 0, sovrascriviamo il file dati. Se riprendiamo, appendiamo.
+    modalita_file = 'a' if start_at > 0 else 'w'
+    
+    print(f"🚀 Inizio estrazione. JQL: {JQL}")
+    print(f"📍 Ripresa dal record: {start_at}")
+
+    with open(FILE_DATI, modalita_file, encoding='utf-8') as file_out:
+        
+        while start_at < totale_issue:
+            query = {
+                'jql': JQL,
+                'startAt': start_at,
+                'maxResults': MAX_RESULTS,
+                'fields': 'summary,status,assignee,created' 
+            }
+
+            try:
+                response = session.get(url, params=query, timeout=30)
+                response.raise_for_status() # Solleva eccezione per errori HTTP non gestiti dal Retry (es. 401, 403, 400)
+            except requests.exceptions.RequestException as e:
+                print(f"\n❌ Errore critico di connessione non recuperabile: {e}")
+                print(f"💾 Lo stato è salvato. Rilancia lo script per riprendere da {start_at}.")
+                sys.exit(1)
+
+            data = response.json()
+            totale_issue = data.get('total', 0)
+            issues = data.get('issues', [])
+
+            if not issues:
+                break
+
+            # 1. Scriviamo PRIMA i dati su disco
+            for issue in issues:
+                file_out.write(json.dumps(issue) + '\n')
+            
+            # Assicuriamoci che i dati siano fisicamente scritti su disco
+            file_out.flush()
+            os.fsync(file_out.fileno())
+
+            # 2. Solo DOPO aggiorniamo il checkpoint
+            start_at += len(issues)
+            salva_checkpoint(JQL, start_at)
+
+            print(f"✅ Estratte e salvate {start_at} di {totale_issue} issue...")
+
+    print("🎉 Estrazione completata con successo.")
+    # Pulizia: a lavoro finito rimuoviamo il checkpoint
+    if os.path.exists(FILE_CHECKPOINT):
+        os.remove(FILE_CHECKPOINT)
+
+if __name__ == "__main__":
+    estrai_issue()
