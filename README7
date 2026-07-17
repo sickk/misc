@@ -1,0 +1,196 @@
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import urllib3
+import json
+import sys
+
+# Disabilita avvisi SSL per certificati self-signed o proxy aziendali
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- CONFIGURAZIONE ---
+DOMINIO = "jira.tua-azienda.com" 
+BEARER_TOKEN = "il_tuo_personal_access_token_oppure_oauth_token"
+JQL_BASE = 'project = "DEV" AND status = "In Progress" ORDER BY created ASC'
+
+FILE_BASE = "1_jira_base_issues.jsonl"
+FILE_LINKED = "2_jira_linked_issues.jsonl"
+FILE_TXT = "3_jira_unique_keys.txt"
+
+TIPI_DA_ESCLUDERE = {"opus", "epic"} # Case-insensitive
+
+def crea_sessione():
+    session = requests.Session()
+    session.headers.update({
+        "Accept": "application/json",
+        "Authorization": f"Bearer {BEARER_TOKEN}"
+    })
+    session.verify = False
+
+    retries = Retry(total=5, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504], respect_retry_after_header=True)
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter) 
+    return session
+
+def estrai_base(session):
+    """Fase 1: Estrae le issue principali basate sulla JQL."""
+    url = f"https://{DOMINIO}/rest/api/2/search"
+    start_at = 0
+    max_results = 100
+    totale_issue = 1
+    
+    print(f"🚀 [FASE 1] Estrazione issue base. JQL: {JQL_BASE}")
+    
+    with open(FILE_BASE, 'w', encoding='utf-8') as file_out:
+        while start_at < totale_issue:
+            query = {
+                'jql': JQL_BASE,
+                'startAt': start_at,
+                'maxResults': max_results,
+                # NOTA: Aggiunto 'issuetype' per il filtro finale
+                'fields': 'summary,status,assignee,created,issuelinks,subtasks,parent,issuetype' 
+            }
+
+            response = session.get(url, params=query, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            totale_issue = data.get('total', 0)
+            issues = data.get('issues', [])
+
+            if not issues: break
+
+            for issue in issues:
+                file_out.write(json.dumps(issue) + '\n')
+
+            start_at += len(issues)
+            print(f"   📥 Scaricate {start_at}/{totale_issue} issue base...")
+
+def analizza_link():
+    """Fase 2: Legge il file base e mappa tutte le connessioni."""
+    chiavi_esistenti = set()
+    mappa_collegate = {} # Struttura: { "DEV-2": {"source": "DEV-1", "type": "Blocks"} }
+
+    print(f"🔍 [FASE 2] Analisi delle relazioni nel file base...")
+    
+    with open(FILE_BASE, 'r', encoding='utf-8') as f:
+        for riga in f:
+            issue = json.loads(riga)
+            key_corrente = issue.get("key")
+            if not key_corrente: continue
+            
+            chiavi_esistenti.add(key_corrente)
+            fields = issue.get("fields", {})
+
+            # 1. Subtasks
+            for sub in fields.get("subtasks", []):
+                k = sub.get("key")
+                if k: mappa_collegate[k] = {"source": key_corrente, "type": "Subtask"}
+
+            # 2. Parent
+            parent = fields.get("parent")
+            if parent and parent.get("key"):
+                mappa_collegate[parent.get("key")] = {"source": key_corrente, "type": "Parent"}
+
+            # 3. Issue Links
+            for link in fields.get("issuelinks", []):
+                tipo_link = link.get("type", {}).get("name", "Link generico")
+                if "outwardIssue" in link:
+                    k = link["outwardIssue"].get("key")
+                    if k: mappa_collegate[k] = {"source": key_corrente, "type": f"Outward: {tipo_link}"}
+                if "inwardIssue" in link:
+                    k = link["inwardIssue"].get("key")
+                    if k: mappa_collegate[k] = {"source": key_corrente, "type": f"Inward: {tipo_link}"}
+
+    # Sottrazione degli insiemi: escludiamo le issue già scaricate nella Fase 1
+    chiavi_da_scaricare = set(mappa_collegate.keys()) - chiavi_esistenti
+    
+    # Filtriamo la mappa mantenendo solo i metadati di quelle che dobbiamo effettivamente scaricare
+    mappa_finale = {k: v for k, v in mappa_collegate.items() if k in chiavi_da_scaricare}
+    
+    print(f"   📊 Trovate {len(mappa_finale)} issue collegate univoche da scaricare.")
+    return mappa_finale
+
+def estrai_collegate(session, mappa_collegate):
+    """Fase 3: Scarica a blocchi le issue collegate e inietta i metadati della relazione."""
+    if not mappa_collegate:
+        print("⏭️ [FASE 3] Nessuna issue collegata da scaricare. Salto.")
+        with open(FILE_LINKED, 'w', encoding='utf-8') as f: pass # Crea file vuoto per la Fase 4
+        return
+
+    print(f"🚀 [FASE 3] Estrazione batch delle {len(mappa_collegate)} issue collegate...")
+    url = f"https://{DOMINIO}/rest/api/2/search"
+    lista_chiavi = list(mappa_collegate.keys())
+    dimensione_blocco = 100
+    blocchi = [lista_chiavi[i:i + dimensione_blocco] for i in range(0, len(lista_chiavi), dimensione_blocco)]
+    
+    totale_scaricate = 0
+
+    with open(FILE_LINKED, 'w', encoding='utf-8') as file_out:
+        for indice, blocco in enumerate(blocchi):
+            jql_batch = f"key IN ({','.join(blocco)})"
+            query = {
+                'jql': jql_batch,
+                'maxResults': dimensione_blocco,
+                'fields': 'summary,status,assignee,created,issuetype' # Richiesto issuetype!
+            }
+
+            response = session.get(url, params=query, timeout=30)
+            if response.status_code != 200:
+                print(f"   ❌ Errore API blocco {indice+1}: {response.status_code}")
+                continue
+
+            issues = response.json().get('issues', [])
+            
+            for issue in issues:
+                k = issue.get("key")
+                # INIEZIONE DATI: Aggiungiamo i metadati della relazione richiesti
+                issue["_meta_relazione"] = mappa_collegate.get(k, {})
+                file_out.write(json.dumps(issue) + '\n')
+                
+            totale_scaricate += len(issues)
+            print(f"   📥 Blocco {indice+1}/{len(blocchi)}: {totale_scaricate} issue collegate salvate.")
+
+def genera_txt_esclusioni():
+    """Fase 4: Unisce i JSONL, filtra i tipi non voluti e genera il TXT."""
+    print(f"⚙️ [FASE 4] Generazione file TXT con esclusioni ({', '.join(TIPI_DA_ESCLUDERE)})...")
+    
+    chiavi_valide = set()
+    file_da_leggere = [FILE_BASE, FILE_LINKED]
+
+    for nome_file in file_da_leggere:
+        try:
+            with open(nome_file, 'r', encoding='utf-8') as f:
+                for riga in f:
+                    if not riga.strip(): continue
+                    issue = json.loads(riga)
+                    
+                    key = issue.get("key")
+                    fields = issue.get("fields", {})
+                    issuetype = fields.get("issuetype", {}).get("name", "").lower()
+
+                    if key and issuetype not in TIPI_DA_ESCLUDERE:
+                        chiavi_valide.add(key)
+        except FileNotFoundError:
+            pass # Ignora se un file non è stato generato (es. zero collegate)
+
+    with open(FILE_TXT, 'w', encoding='utf-8') as f:
+        # Ordiniamo le chiavi alfabeticamente per pulizia
+        for key in sorted(list(chiavi_valide)):
+            f.write(f"{key}\n")
+            
+    print(f"✅ Finito! Salvate {len(chiavi_valide)} chiavi univoche in {FILE_TXT}.")
+
+if __name__ == "__main__":
+    sessione_http = crea_sessione()
+    try:
+        estrai_base(sessione_http)
+        mappa_relazioni = analizza_link()
+        estrai_collegate(sessione_http, mappa_relazioni)
+        genera_txt_esclusioni()
+        print("\n🎉 Processo completato con successo.")
+    except Exception as e:
+        print(f"\n❌ Errore critico: {e}")
+        sys.exit(1)
+               
