@@ -1,0 +1,109 @@
+import requests
+import json
+import sys
+
+# ==========================================
+# CONFIGURAZIONE
+# ==========================================
+JIRA_BASE_URL = "https://tua-istanza-jira.com"
+ISSUE_KEY = "PROGETTO-123"
+# Usa un Personal Access Token (PAT) creato dal tuo profilo Jira
+PAT_TOKEN = "IL_TUO_PERSONAL_ACCESS_TOKEN"
+
+HEADERS = {
+    "Authorization": f"Bearer {PAT_TOKEN}",
+    "Accept": "application/json"
+}
+
+def check_jira_issue_fixversion_blocker():
+    print(f"Inizio diagnostica meticolosa per il ticket: {ISSUE_KEY}\n")
+    print("-" * 50)
+
+    # ---------------------------------------------------------
+    # TEST 1: Verifica Permessi (Resolve Issues & Edit Issues)
+    # ---------------------------------------------------------
+    print("TEST 1: Verifica Permessi Effettivi...")
+    perm_url = f"{JIRA_BASE_URL}/rest/api/2/mypermissions?issueKey={ISSUE_KEY}"
+    
+    try:
+        response = requests.get(perm_url, headers=HEADERS)
+        response.raise_for_status()
+        perms = response.json().get("permissions", {})
+        
+        can_edit = perms.get("EDIT_ISSUES", {}).get("havePermission", False)
+        can_resolve = perms.get("RESOLVE_ISSUES", {}).get("havePermission", False)
+        
+        print(f"  - Permesso 'Edit Issues': {'PASSATO' if can_edit else 'FALLITO'}")
+        print(f"  - Permesso 'Resolve Issues': {'PASSATO' if can_resolve else 'FALLITO'}")
+        
+        if not can_resolve:
+            print("\n>>> RISPOSTA TROVATA: Non hai il permesso 'Resolve Issues' su questo ticket. La Fix Version è bloccata a livello di Permission Scheme.")
+            # Non interrompo lo script, voglio darti il quadro completo
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Errore API Permessi: {e}")
+        sys.exit(1)
+
+    print("-" * 50)
+
+    # ---------------------------------------------------------
+    # TEST 2: Verifica Edit Meta (UI, Screens, Workflow Properties)
+    # ---------------------------------------------------------
+    print("TEST 2: Verifica 'Edit Meta' (Configurazione Schermate e Workflow)...")
+    meta_url = f"{JIRA_BASE_URL}/rest/api/2/issue/{ISSUE_KEY}/editmeta"
+    
+    try:
+        response = requests.get(meta_url, headers=HEADERS)
+        response.raise_for_status()
+        fields = response.json().get("fields", {})
+        
+        has_fix_versions = "fixVersions" in fields
+        
+        if has_fix_versions:
+            print("  - Campo 'Fix Version' presente nella Edit Screen: PASSATO")
+        else:
+            print("  - Campo 'Fix Version' presente nella Edit Screen: FALLITO")
+            print("\n>>> RISPOSTA TROVATA: Il campo 'Fix Version' non è esposto per la modifica.")
+            print("    Cause possibili:")
+            print("    1. Manca nella 'Edit Screen' associata a questo Issue Type.")
+            print("    2. È nascosto nella 'Field Configuration'.")
+            print("    3. Lo stato attuale del Workflow ha la property 'jira.issue.editable = false'.")
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Errore API Edit Meta: {e}")
+        sys.exit(1)
+
+    print("-" * 50)
+
+    # ---------------------------------------------------------
+    # TEST 3: Verifica Versioni del Progetto
+    # ---------------------------------------------------------
+    print("TEST 3: Verifica Disponibilità Versioni (Dato di Business)...")
+    project_key = ISSUE_KEY.split("-")[0]
+    versions_url = f"{JIRA_BASE_URL}/rest/api/2/project/{project_key}/versions"
+    
+    try:
+        response = requests.get(versions_url, headers=HEADERS)
+        response.raise_for_status()
+        versions = response.json()
+        
+        unreleased_versions = [v for v in versions if not v.get("released", False) and not v.get("archived", False)]
+        
+        print(f"  - Totale versioni nel progetto: {len(versions)}")
+        print(f"  - Versioni attive e non rilasciate (utilizzabili come Fix Version): {len(unreleased_versions)}")
+        
+        if len(unreleased_versions) == 0:
+            print("\n>>> RISPOSTA TROVATA: Il progetto non ha versioni valide (Unreleased).")
+            print("    Jira disabilita il campo Fix Version se non ci sono versioni future selezionabili.")
+        else:
+            print(f"  - Esempio versione valida: {unreleased_versions[0].get('name')}")
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Errore API Versioni: {e}")
+        sys.exit(1)
+
+    print("-" * 50)
+    print("Diagnostica completata.")
+
+if __name__ == "__main__":
+    check_jira_issue_fixversion_blocker()
