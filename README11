@@ -1,0 +1,86 @@
+import gitlab
+import csv
+import sys
+import os
+
+# ==========================================
+# CONFIGURAZIONE
+# ==========================================
+GITLAB_URL = 'https://gitlab.com'  # Modifica se usi un'istanza self-hosted
+PRIVATE_TOKEN = 'INSERISCI_IL_TUO_TOKEN_QUI'
+INPUT_FILE = 'repos.txt'
+OUTPUT_FILE = 'output.csv'
+
+def main():
+    # 1. Verifica esistenza file di input
+    if not os.path.exists(INPUT_FILE):
+        print(f"Errore: Il file {INPUT_FILE} non esiste. Crealo e inserisci i 'gruppo/nome-repo'.")
+        sys.exit(1)
+
+    # 2. Autenticazione
+    try:
+        gl = gitlab.Gitlab(GITLAB_URL, private_token=PRIVATE_TOKEN)
+        gl.auth()
+    except gitlab.exceptions.GitlabAuthenticationError:
+        print("Errore CRITICO: Autenticazione fallita. Verifica il tuo PRIVATE_TOKEN.")
+        sys.exit(1)
+    except Exception as e:
+         print(f"Errore di connessione a GitLab: {e}")
+         sys.exit(1)
+
+    results = []
+
+    # 3. Lettura dei repository (attendiamo il path_with_namespace)
+    with open(INPUT_FILE, 'r') as f:
+        repo_names = [line.strip() for line in f if line.strip()]
+
+    print(f"Trovati {len(repo_names)} repository nel file {INPUT_FILE}. Inizio estrazione...")
+
+    # 4. Estrazione dati
+    for repo_name in repo_names:
+        row_data = {
+            'Repository': repo_name,
+            'Last_Commit_Date': 'N/A',
+            'Last_Commit_Author': 'N/A',
+            'Status': 'OK'
+        }
+        
+        try:
+            # Ricerca tramite ID/Path (NON per nome semplice, che è inaffidabile)
+            project = gl.projects.get(repo_name)
+            
+            # Recupera solo il primo commit (il più recente) del branch di default
+            commits = project.commits.list(per_page=1, get_all=False)
+            
+            if commits:
+                last_commit = commits[0]
+                row_data['Last_Commit_Date'] = last_commit.created_at
+                row_data['Last_Commit_Author'] = last_commit.author_name
+            else:
+                row_data['Status'] = 'Repository vuoto (nessun commit)'
+                
+        except gitlab.exceptions.GitlabGetError as e:
+            if e.response_code == 404:
+                row_data['Status'] = 'Errore 404: Repo non trovato (o permessi insufficienti)'
+            else:
+                row_data['Status'] = f'Errore API: {e.response_code}'
+        except Exception as e:
+            row_data['Status'] = f'Eccezione: {str(e)}'
+            
+        results.append(row_data)
+
+    # 5. Generazione CSV
+    try:
+        with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ['Repository', 'Last_Commit_Date', 'Last_Commit_Author', 'Status']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+            for row in results:
+                writer.writerow(row)
+        print(f"\nCompletato. CSV generato con successo: {OUTPUT_FILE}")
+    except IOError as e:
+         print(f"Errore durante la scrittura del file CSV: {e}")
+
+if __name__ == '__main__':
+    main()
